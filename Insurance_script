@@ -1,0 +1,274 @@
+## Create an H2O cloud 
+library(h2o)
+h2o.init(
+  nthreads=-1,            ## -1: use all available threads
+  max_mem_size = "20G")    ## specify the memory size for the H2O cloud
+options(java.parameters ="-Xmx512m")
+#h2o.removeAll() # Clean slate - just in case the cluster was already running
+
+## Load a file from disk
+all_train <- h2o.importFile(path = normalizePath("/home/muthiyagarajan/Kaggle/train.csv"))
+all_test <- h2o.importFile(path = normalizePath("/home/muthiyagarajan/Kaggle/test.csv"))
+
+ggplot(all_train, aes(x=loss)) + geom_density()
+
+##Convert loss to log
+all_train$loss <- log(all_train$loss)
+
+# Partition the data into training, validation and test sets
+splits.all <- h2o.splitFrame(data = all_train, 
+                             ratios = c(0.70, 0.25),  #partition data into 95%, 5%, 5% chunks
+                             seed = 1)  #setting a seed will guarantee reproducibility
+all_tr <- splits.all[[1]]
+all_v <- splits.all[[2]]
+all_te <- splits.all[[3]]
+
+## Iteration 1 of GLM
+glm1.all <- h2o.glm(y = 132, x = 2:131, training_frame = all_tr,
+                     validation_frame = all_v, family = "gaussian")
+        
+## Iteration 2 of GLM
+glm2.all = h2o.glm(training_frame = all_tr
+                   ,validation_frame = all_v, 
+                   x = 2:131, 
+                   y = 132, 
+                   family='gaussian', 
+                   lambda_search=TRUE)
+
+## Iteration 1 of random forest
+rf1.all <- h2o.randomForest(         
+  training_frame = all_tr,        
+  validation_frame = all_v,      
+  x=2:131,                        
+  y=132,                          
+  model_id = "rf_all_m1",    
+  ntrees = 200,                  
+  stopping_rounds = 2,           
+  score_each_iteration = T,      
+  seed = 1000000)
+
+##RF Iteration 2
+rf2.all <- h2o.randomForest(        
+  training_frame = all_tr,       
+  validation_frame = all_v,     
+  x=2:131,                       
+  y=132,                         
+  model_id = "rf_all_m2",      
+  ntrees = 200,                 
+  max_depth = 30,               
+  stopping_rounds = 2,          
+  stopping_tolerance = 1e-2,    
+  score_each_iteration = T,     
+  seed=3000000) 
+
+## Iteration 1 of GBM
+gbm1.all <- h2o.gbm(
+  training_frame = all_tr,       
+  validation_frame = all_v,      
+  x=2:131,                        
+  y=132,                          
+  model_id = "gbm_all_m1",     
+  seed = 2000000)  
+
+## GBM Iteration 2
+gbm2.all <- h2o.gbm(
+  training_frame = all_tr,     
+  validation_frame = all_v,   
+  x=2:131,                     
+  y=132,                       
+  ntrees = 20,                
+  learn_rate = 0.2,           
+  max_depth = 10,             
+  stopping_rounds = 2,        
+  stopping_tolerance = 0.01,  
+  score_each_iteration = T,   
+  model_id = "gbm_all_m2",  
+  seed = 2000000)   
+
+##GBM Iteration 3
+gbm3.all <- h2o.gbm(
+  training_frame = all_tr,     
+  validation_frame = all_v,   
+  x=2:131,                     
+  y=132,                       
+  ntrees = 30,                
+  learn_rate = 0.3,           
+  max_depth = 10,             
+  sample_rate = 0.7,          
+  col_sample_rate = 0.7,      
+  stopping_rounds = 2,        
+  stopping_tolerance = 0.01,  
+  score_each_iteration = T,   
+  model_id = "gbm_all_m3",  
+  seed = 2000000)   
+
+
+## Deep learning Model Iteration 1
+
+dl1.all <- h2o.deeplearning(
+  model_id="dl_all_m1", 
+  training_frame=all_tr, 
+  validation_frame=all_v,   ## validation dataset: used for scoring and early stopping
+  x=2:131,
+  y=132,
+  #activation="Rectifier",  ## default
+  #hidden=c(200,200),       ## default: 2 hidden layers with 200 neurons each
+  epochs=1,
+  variable_importances=T    ## not enabled by default
+)
+
+## Deep learning Model Iteration 2
+
+dl2.all <- h2o.deeplearning(
+  model_id="dl_all_m2", 
+  training_frame=all_tr, 
+  validation_frame=all_v,
+  x=2:131,
+  y=132,
+  hidden=c(32,32,32),                  ## small network, runs faster
+  epochs=1000000,                      ## hopefully converges earlier...
+  score_validation_samples=10000,      ## sample the validation dataset (faster)
+  stopping_rounds=2,
+  stopping_metric="r2", ## could be "MSE","logloss","r2"
+  stopping_tolerance=0.01
+)
+
+## Deep learning Model Iteration 3
+
+dl3.all <- h2o.deeplearning(
+  model_id="dl_plm_m3", 
+  training_frame=all_tr, 
+  validation_frame=all_v, 
+  x=2:131, 
+  y=132, 
+  overwrite_with_best_model=F,    ## Return the final model after 10 epochs, even if not the best
+  hidden=c(128,128,128),          ## more hidden layers -> more complex interactions
+  epochs=10,                      ## to keep it short enough
+  score_validation_samples=300000, ## downsample validation set for faster scoring
+  score_duty_cycle=0.025,         ## don't score more than 2.5% of the wall time
+  adaptive_rate=F,                ## manually tuned learning rate
+  rate=0.01, 
+  rate_annealing=2e-6,            
+  momentum_start=0.2,             ## manually tuned momentum
+  momentum_stable=0.4, 
+  momentum_ramp=1e7, 
+  l1=1e-5,                        ## add some L1/L2 regularization
+  l2=1e-5,
+  variable_importances = TRUE,
+  max_w2=10                       ## helps stability for Rectifier
+) 
+
+#Predictions
+pred_gbm1_all <- h2o.predict(gbm1.all, all_test)
+pred_gbm1_test <-h2o.cbind(all_test[,"id"],pred_gbm1_all[,"predict"])
+
+pred_gbm2_all <- h2o.predict(gbm2.all, all_test)
+pred_gbm2_test <-h2o.cbind(all_test[,"id"],pred_gbm2_all[,"predict"])
+
+pred_grid_all_dl <- h2o.predict(best_model_dl, all_test)
+pred_grid_test_dl <-h2o.cbind(all_test[,"id"],pred_grid_all_dl[,"predict"])
+
+pred_grid_all_gbm <- h2o.predict(best_model_gbm, all_test)
+pred_grid_test_gbm <-h2o.cbind(all_test[,"id"],pred_grid_all_gbm[,"predict"])
+
+#Export to csv
+h2o.exportFile(pred_gbm1_test, path = "/home/muthiyagarajan/Kaggle/submission.csv")
+h2o.exportFile(pred_grid_test, path = "/home/muthiyagarajan/Kaggle/submission1.csv")
+
+# Compute Variable Importance
+varimps = data.frame(h2o.varimp(rf1.all))
+varimps
+
+# Identify variable importance for neural nets
+dl3.plm@parameters
+h2o.auc(dl3.plm, valid = TRUE)
+
+## Save the Model
+path <- h2o.saveModel(gbm3.plm, 
+                      path="./mybest_gbm_plm_model", force=TRUE)
+
+##Grid search
+hidden_opt <- list(c(200,200), c(100,300,100), c(500,500,500))
+l1_opt <- c(1e-5,1e-7)
+hyper_params <- list(hidden = hidden_opt, l1 = l1_opt)
+model_grid <- h2o.grid("deeplearning",
+                       hyper_params = hyper_params,
+                       x = 2:131,
+                       y = 132,
+                       distribution = "gaussian",
+                       training_frame = all_tr,
+                       validation_frame = all_v)
+
+## Find the best model and its full set of parameters
+model_grid@summary_table[1,]
+best_model_dl <- h2o.getModel(model_grid@model_ids[[1]])
+best_model_dl
+
+## Grid Search for GBM
+## Hyper-Parameter Search
+
+## Construct a large Cartesian hyper-parameter space
+ntrees_opts <- c(10000) ## early stopping will stop earlier
+max_depth_opts <- seq(1,20)
+min_rows_opts <- c(1,5,10,20,50,100)
+learn_rate_opts <- seq(0.001,0.01,0.001)
+sample_rate_opts <- seq(0.3,1,0.05)
+col_sample_rate_opts <- seq(0.3,1,0.05)
+col_sample_rate_per_tree_opts = seq(0.3,1,0.05)
+#nbins_cats_opts = seq(100,10000,100) ## no categorical features in this dataset
+
+hyper_params = list( ntrees = ntrees_opts,
+                     max_depth = max_depth_opts,
+                     min_rows = min_rows_opts,
+                     learn_rate = learn_rate_opts,
+                     sample_rate = sample_rate_opts,
+                     col_sample_rate = col_sample_rate_opts,
+                     col_sample_rate_per_tree = col_sample_rate_per_tree_opts
+                     #,nbins_cats = nbins_cats_opts
+)
+
+
+## Search a random subset of these hyper-parmameters (max runtime and max models are enforced, and the search will stop after we don't improve much over the best 5 random models)
+search_criteria = list(strategy = "RandomDiscrete", max_runtime_secs = 600, max_models = 100, stopping_metric = "AUTO", stopping_tolerance = 0.00001, stopping_rounds = 5, seed = 123456)
+
+gbm.grid <- h2o.grid("gbm",
+                     grid_id = "mygrid",
+                     x = 2:131,
+                     y = 132,
+                     
+                     # faster to use a 80/20 split
+                     training_frame = all_tr,
+                     validation_frame = all_v,
+                     nfolds = 0,
+                     
+                     # alternatively, use N-fold cross-validation
+                     #training_frame = train,
+                     #nfolds = 5,
+                     
+                     distribution="gaussian", ## best for MSE loss, but can try other distributions ("laplace", "quantile")
+                     
+                     ## stop as soon as mse doesn't improve by more than 0.1% on the validation set,
+                     ## for 2 consecutive scoring events
+                     stopping_rounds = 2,
+                     stopping_tolerance = 1e-3,
+                     stopping_metric = "MSE",
+                     
+                     score_tree_interval = 100, ## how often to score (affects early stopping)
+                     seed = 123456, ## seed to control the sampling of the Cartesian hyper-parameter space
+                     hyper_params = hyper_params,
+                     search_criteria = search_criteria)
+
+gbm.sorted.grid <- h2o.getGrid(grid_id = "mygrid", sort_by = "mse")
+print(gbm.sorted.grid)
+
+best_model_gbm <- h2o.getModel(gbm.sorted.grid@model_ids[[1]])
+summary(best_model_gbm)
+
+## scoring history for gbm
+scoring_history_gbm <- as.data.frame(best_model_gbm@model$scoring_history)
+plot(scoring_history_gbm$number_of_trees, scoring_history_gbm$training_MSE, type="p") #training mse
+points(scoring_history_gbm$number_of_trees, scoring_history_gbm$validation_MSE, type="l") #validation mse
+
+## get the actual number of trees
+ntrees <- best_model_gbm@model$model_summary$number_of_trees
+print(ntrees)
